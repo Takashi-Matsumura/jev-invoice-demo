@@ -1,36 +1,61 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 請求書 PDF の仕分けデモ
 
-## Getting Started
+スキャンした PDF を、後続の処理に進む前に「請求書」「要確認」「請求書以外」「読取不可」に仕分けるデモです。
+AI-OCR と jev（TypeSafe AI）による分類の仕組みを、担当部署に説明するために作っています。
 
-First, run the development server:
+## 仕組み
+
+PDF 1 件ごとに、次の 5 段階を順に実行します。複数の PDF を入れると 1 件ずつ処理し、終わったものから結果を表示します。
+
+| 段階 | 実行場所 | 内容 |
+|---|---|---|
+| 1. 画像化 | この PC | mupdf で PDF をページごとの画像にする |
+| 2. AI-OCR | この PC | vision 対応のローカル LLM（llama-server）が画像を文字起こしする |
+| 3. 登録番号の検出 | この PC | 正規表現で T＋13桁を拾い、法人番号のチェックデジットで読み違いを検出する |
+| 4. jev で判定 | 外部 API | 文字起こししたテキストに、型付きの質問（書類の種類、必須項目の有無、途切れ）を投げる |
+| 5. 分類 | この PC | 3 と 4 の結果からルールで分類を決める |
+
+PDF と画像は PC の外に出ません。**文字起こししたテキストは TypeSafe AI の API に送信されます。**
+
+jev は文章を生成せず、質問に対する答えとその確率だけを返します。返ってきた確率は結果カードに数値で並び、「詳細」を押すと OCR の結果、送った質問、選択肢ごとの確率を確認できます。画面の左側には、ステップごとの処理時間の内訳が出ます。
+
+### 分類のルール
+
+| 分類 | 条件 |
+|---|---|
+| 請求書 | 書類の種類が請求書で、登録番号と必須項目（請求金額の合計・発行元・発行日または請求年月）が揃っている |
+| 要確認 | 請求書だが、登録番号が見つからない／必須項目が欠けている／内容が途切れている疑いがある／確信度が低い |
+| 請求書以外 | 納品書・領収書・見積書・その他 |
+| 読取不可 | 文字をほとんど読み取れなかった |
+
+質問文と閾値は `lib/invoice-questions.ts`、分類のルールは `lib/verdict.ts` にあります。
+
+## 前提
+
+- Node.js 20.9 以上
+- vision 対応の llama-server が起動していること（既定は `http://localhost:8084`）
+- TypeSafe AI の API キー
+
+## 起動
 
 ```bash
+cp .env.local.example .env.local   # TYPESAFE_API_KEY を記入する
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+http://localhost:3000 を開き、PDF をドロップします。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 検証
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run typecheck && npm run lint && npm test
+```
 
-## Learn More
+実物の PDF で試す場合は `samples/` に置いてください（git の管理対象外です）。
 
-To learn more about Next.js, take a look at the following resources:
+## 制限
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- 1 ファイル 20MB まで、先頭 10 ページまでを読みます
+- 登録番号が実在するかどうか（国税庁の公表サイトとの照合）は確認しません
+- 認証や結果の保存はありません。手元の PC で動かす説明用のデモです
