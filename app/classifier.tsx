@@ -4,10 +4,17 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import type { ClassifyEvent } from "@/lib/events";
 import { CATEGORY_LABELS, type Category } from "@/lib/verdict";
 import { DetailDialog } from "./detail-dialog";
-import { Eta } from "./eta";
 import { ItemCard } from "./item-card";
 import { CATEGORY_STYLES, reducer } from "./items";
+import { ProgressClock } from "./progress-clock";
 import { Stats } from "./stats";
+
+type Job = {
+  id: string;
+  file: File;
+  /** 読み終えたページの OCR テキスト。一時停止から再開するとき、続きのページから始めるために送る */
+  doneTexts: string[];
+};
 
 async function readNdjson(
   body: ReadableStream<Uint8Array>,
@@ -36,16 +43,27 @@ export function Classifier() {
   const [items, dispatch] = useReducer(reducer, []);
   const [dragging, setDragging] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [paused, setPaused] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const queue = useRef<{ id: string; file: File }[]>([]);
+  const queue = useRef<Job[]>([]);
   const running = useRef(false);
+  const pauseRequested = useRef(false);
   const abort = useRef<AbortController | null>(null);
+  const batch = useRef(0);
+  const unmounted = useRef(false);
 
-  useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => {
+    // 開発時の StrictMode は後始末のあとにもう一度マウントするので、ここで戻す
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+      abort.current?.abort();
+    };
+  }, []);
 
-  // 処理中のカードを見える位置まで送る。全件終わったら、最後に終わったカードを結果ごと見せる
+  // 処理中（または一時停止中）のカードを見える位置まで送る。全件終わったら、最後に終わったカードを結果ごと見せる
   const followed =
-    items.find((item) => item.phase === "running") ??
+    items.find((item) => item.phase === "running" || item.phase === "paused") ??
     [...items].reverse().find((item) => item.phase === "done" || item.phase === "error");
   const followedId = followed?.id;
   const followedPhase = followed?.phase;
@@ -54,9 +72,10 @@ export function Classifier() {
     document.getElementById(`item-${followedId}`)?.scrollIntoView({ block: "nearest" });
   }, [autoScroll, followedId, followedPhase]);
 
-  async function classify(id: string, file: File, signal: AbortSignal) {
+  async function classify(job: Job, signal: AbortSignal) {
     const body = new FormData();
-    body.append("file", file);
+    body.append("file", job.file);
+    body.append("done", JSON.stringify(job.doneTexts));
     const res = await fetch("/api/classify", { method: "POST", body, signal });
     if (!res.ok || !res.body) {
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -66,7 +85,8 @@ export function Classifier() {
     let finished = false;
     await readNdjson(res.body, (event) => {
       if (event.type === "result" || event.type === "error") finished = true;
-      dispatch({ type: "event", id, event, at: Date.now() });
+      if (event.type === "page") job.doneTexts.push(event.text);
+      dispatch({ type: "event", id: job.id, event, at: Date.now() });
     });
     if (!finished) throw new Error("応答が途中で切れました");
   }
@@ -75,18 +95,27 @@ export function Classifier() {
   async function pump() {
     if (running.current) return;
     running.current = true;
-    const controller = new AbortController();
-    abort.current = controller;
 
-    for (let next = queue.current.shift(); next; next = queue.current.shift()) {
-      dispatch({ type: "start", id: next.id, startedAt: Date.now() });
+    while (!pauseRequested.current && !unmounted.current) {
+      const job = queue.current.shift();
+      if (!job) break;
+
+      const controller = new AbortController();
+      abort.current = controller;
+      dispatch({ type: "start", id: job.id, at: Date.now() });
       try {
-        await classify(next.id, next.file, controller.signal);
+        await classify(job, controller.signal);
       } catch (error) {
-        if (controller.signal.aborted) break;
+        if (controller.signal.aborted) {
+          // 一時停止で中断した。読みかけの PDF を列の先頭に戻し、再開時に読み終えたページの続きから始める。
+          // 止まる前にもう再開されていたら、ループの先頭でそのまま処理し直す
+          queue.current.unshift(job);
+          dispatch({ type: "pause", id: job.id, at: Date.now() });
+          continue;
+        }
         dispatch({
           type: "fail",
-          id: next.id,
+          id: job.id,
           // fetch は接続が切れると TypeError（"network error" など）を投げる
           message:
             error instanceof TypeError
@@ -103,18 +132,38 @@ export function Classifier() {
   function addFiles(files: FileList | null) {
     const pdfs = [...(files ?? [])].filter(isPdf);
     if (pdfs.length === 0) return;
-    const added = pdfs.map((file) => ({ id: crypto.randomUUID(), file }));
+    const added = pdfs.map((file) => ({ id: crypto.randomUUID(), file, doneTexts: [] }));
     queue.current.push(...added);
-    dispatch({ type: "add", items: added.map(({ id, file }) => ({ id, name: file.name })) });
+    batch.current += 1;
+    dispatch({
+      type: "add",
+      items: added.map(({ id, file }) => ({ id, name: file.name })),
+      batch: batch.current,
+    });
     void pump();
   }
 
-  const busy = items.some((item) => item.phase === "queued" || item.phase === "running");
+  function pause() {
+    pauseRequested.current = true;
+    setPaused(true);
+    abort.current?.abort();
+  }
+
+  function resume() {
+    pauseRequested.current = false;
+    setPaused(false);
+    void pump();
+  }
+
+  const busy = items.some(
+    (item) => item.phase === "queued" || item.phase === "running" || item.phase === "paused",
+  );
+  const working = busy && !paused;
 
   // 処理中は画面を点けたままにして、放置によるスリープで接続が切れるのを防ぐ。
   // ロックはタブが隠れると外れるので、見える状態に戻ったら取り直す
   useEffect(() => {
-    if (!busy || !("wakeLock" in navigator)) return;
+    if (!working || !("wakeLock" in navigator)) return;
 
     let lock: WakeLockSentinel | null = null;
     let released = false;
@@ -138,7 +187,7 @@ export function Classifier() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       void lock?.release();
     };
-  }, [busy]);
+  }, [working]);
 
   const finishedCount = items.filter((item) => item.phase === "done" || item.phase === "error").length;
   const detailItem = items.find((item) => item.id === detailId);
@@ -147,38 +196,43 @@ export function Classifier() {
     // 行の高さを minmax(0,1fr) で親に合わせないと、列が中身の高さまで伸びて内側でスクロールしない
     <div className="flex flex-col gap-4 md:grid md:min-h-0 md:flex-1 md:grid-cols-[20rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
       <aside className="flex flex-col gap-4 md:min-h-0 md:overflow-y-auto md:pr-1">
-        <label
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            addFiles(e.dataTransfer.files);
-          }}
-          className={`flex cursor-pointer flex-col items-center gap-1 rounded-xl border-2 border-dashed px-4 py-6 text-center transition-colors ${
-            dragging
-              ? "border-zinc-900 bg-zinc-100 dark:border-zinc-100 dark:bg-zinc-800"
-              : "border-zinc-300 hover:border-zinc-500 dark:border-zinc-700 dark:hover:border-zinc-500"
-          }`}
-        >
-          <span className="font-medium">PDF をドロップ、またはクリック</span>
-          <span className="text-xs text-zinc-500 dark:text-zinc-400">
-            複数選択できます。1 件ずつ順に処理します
-          </span>
-          <input
-            type="file"
-            accept="application/pdf,.pdf"
-            multiple
-            className="sr-only"
-            onChange={(e) => {
-              addFiles(e.target.files);
-              e.target.value = "";
+        {busy ? (
+          // 処理中は PDF を追加できない。投入欄の場所を、全体の進み具合の表示に使う
+          <ProgressClock items={items} paused={paused} onPause={pause} onResume={resume} />
+        ) : (
+          <label
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
             }}
-          />
-        </label>
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              addFiles(e.dataTransfer.files);
+            }}
+            className={`flex min-h-[9.5rem] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed px-4 py-6 text-center transition-colors ${
+              dragging
+                ? "border-zinc-900 bg-zinc-100 dark:border-zinc-100 dark:bg-zinc-800"
+                : "border-zinc-300 hover:border-zinc-500 dark:border-zinc-700 dark:hover:border-zinc-500"
+            }`}
+          >
+            <span className="font-medium">PDF をドロップ、またはクリック</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              複数選択できます。1 件ずつ順に処理します
+            </span>
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              multiple
+              className="sr-only"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        )}
 
         <ul className="grid grid-cols-2 gap-2 text-sm">
           {(Object.keys(CATEGORY_LABELS) as Category[]).map((category) => (
@@ -203,7 +257,6 @@ export function Classifier() {
           <span className="text-zinc-500 tabular-nums dark:text-zinc-400">
             {finishedCount} / {items.length} 件 完了
           </span>
-          {busy && <Eta items={items} />}
           <label className="ml-auto flex cursor-pointer items-center gap-1.5 select-none">
             <input
               type="checkbox"

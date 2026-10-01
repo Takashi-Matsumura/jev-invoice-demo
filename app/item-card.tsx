@@ -21,7 +21,9 @@ export function ItemCard({ item, onOpenDetail }: { item: Item; onOpenDetail: () 
       className={`rounded-xl border bg-white p-4 dark:bg-zinc-900 ${
         item.phase === "running"
           ? "border-indigo-400 dark:border-indigo-500"
-          : "border-zinc-200 dark:border-zinc-800"
+          : item.phase === "paused"
+            ? "border-amber-400 dark:border-amber-600"
+            : "border-zinc-200 dark:border-zinc-800"
       }`}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -30,8 +32,9 @@ export function ItemCard({ item, onOpenDetail }: { item: Item; onOpenDetail: () 
         </span>
         <span className="text-sm text-zinc-500 tabular-nums dark:text-zinc-400">
           {item.phase === "running" && item.startedAt !== undefined && (
-            <Elapsed startedAt={item.startedAt} />
+            <Elapsed startedAt={item.startedAt} baseMs={item.activeMs ?? 0} />
           )}
+          {item.phase === "paused" && formatMs(item.activeMs ?? 0)}
           {item.elapsedMs !== undefined && formatMs(item.elapsedMs)}
         </span>
         <StatusBadge item={item} />
@@ -40,6 +43,13 @@ export function ItemCard({ item, onOpenDetail }: { item: Item; onOpenDetail: () 
       {item.phase === "running" && (
         <p className="mt-2 flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
           <span className="size-2 animate-pulse rounded-full bg-indigo-500" />
+          {item.status}
+        </p>
+      )}
+
+      {item.phase === "paused" && (
+        <p className="mt-2 flex items-center gap-2 text-sm text-amber-800 dark:text-amber-200">
+          <span className="size-2 rounded-full bg-amber-500" />
           {item.status}
         </p>
       )}
@@ -74,16 +84,16 @@ export function ItemCard({ item, onOpenDetail }: { item: Item; onOpenDetail: () 
   );
 }
 
-/** 処理中の経過時間を数え続ける。 */
-function Elapsed({ startedAt }: { startedAt: number }) {
-  const [elapsedMs, setElapsedMs] = useState(0);
+/** 処理中の経過時間を数え続ける。baseMs は一時停止までに処理していた時間。 */
+function Elapsed({ startedAt, baseMs }: { startedAt: number; baseMs: number }) {
+  const [sinceStartMs, setSinceStartMs] = useState(0);
 
   useEffect(() => {
-    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 100);
+    const timer = setInterval(() => setSinceStartMs(Date.now() - startedAt), 100);
     return () => clearInterval(timer);
   }, [startedAt]);
 
-  return <>{(elapsedMs / 1000).toFixed(1)} 秒</>;
+  return <>{((baseMs + sinceStartMs) / 1000).toFixed(1)} 秒</>;
 }
 
 export function StatusBadge({ item }: { item: Item }) {
@@ -96,7 +106,13 @@ export function StatusBadge({ item }: { item: Item }) {
       </span>
     );
   }
-  const label = { queued: "順番待ち", running: "処理中", done: "完了", error: "エラー" }[item.phase];
+  const label = {
+    queued: "順番待ち",
+    running: "処理中",
+    paused: "一時停止中",
+    done: "完了",
+    error: "エラー",
+  }[item.phase];
   return (
     <span className="rounded-full bg-zinc-100 px-3 py-1 text-sm text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
       {label}

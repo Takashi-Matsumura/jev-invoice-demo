@@ -34,6 +34,8 @@ export async function POST(request: Request) {
     return Response.json({ error: "ファイルが大きすぎます（20MB まで）" }, { status: 413 });
   }
 
+  const doneTexts = parseDoneTexts(formData.get("done"));
+
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
     return Response.json({ error: "PDF ファイルを指定してください" }, { status: 400 });
@@ -68,8 +70,9 @@ export async function POST(request: Request) {
         const processedPages = Math.min(pdf.pageCount, MAX_PAGES);
         send({ type: "meta", pageCount: pdf.pageCount, processedPages });
 
-        const texts: string[] = [];
-        for (let i = 0; i < processedPages; i++) {
+        // 一時停止からの再開では、読み終えたページのテキストを受け取り、続きのページから始める
+        const texts = doneTexts.slice(0, processedPages);
+        for (let i = texts.length; i < processedPages; i++) {
           send({
             type: "status",
             message: `${i + 1}/${processedPages} ページ目を文字起こし中（ローカル AI-OCR）`,
@@ -144,6 +147,18 @@ export async function POST(request: Request) {
       "Cache-Control": "no-store",
     },
   });
+}
+
+/** 読み終えたページの OCR テキスト（JSON の文字列配列）。形が違えば、最初から読み直す。 */
+function parseDoneTexts(value: FormDataEntryValue | null): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || !parsed.every((text) => typeof text === "string")) return [];
+    return parsed.map((text) => text.slice(0, MAX_STATE_CHARS));
+  } catch {
+    return [];
+  }
 }
 
 /** ブラウザからの他サイト経由の呼び出しを拒否する。Origin を付けない curl などは通す。 */

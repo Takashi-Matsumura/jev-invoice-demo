@@ -16,10 +16,14 @@ export type PageResult = {
 export type Item = {
   id: string;
   name: string;
-  phase: "queued" | "running" | "done" | "error";
+  /** 何回目の投入か。進捗は最後に投入したまとまりだけで数える */
+  batch: number;
+  phase: "queued" | "running" | "paused" | "done" | "error";
   status: string;
-  /** 処理を始めた時刻（Date.now()）。経過時間のカウントアップに使う */
+  /** 処理を始めた（再開した）時刻（Date.now()）。経過時間のカウントアップに使う */
   startedAt?: number;
+  /** 一時停止までに処理していた時間の累計 */
+  activeMs?: number;
   /** いま読んでいるページに取りかかった時刻。残り時間の目安に使う */
   pageStartedAt?: number;
   pageCount?: number;
@@ -34,8 +38,9 @@ export type Item = {
 };
 
 export type Action =
-  | { type: "add"; items: { id: string; name: string }[] }
-  | { type: "start"; id: string; startedAt: number }
+  | { type: "add"; items: { id: string; name: string }[]; batch: number }
+  | { type: "start"; id: string; at: number }
+  | { type: "pause"; id: string; at: number }
   | { type: "event"; id: string; event: ClassifyEvent; at: number }
   | { type: "fail"; id: string; message: string }
   | { type: "clear" };
@@ -46,6 +51,7 @@ export function reducer(items: Item[], action: Action): Item[] {
       ...items,
       ...action.items.map((item): Item => ({
         ...item,
+        batch: action.batch,
         phase: "queued",
         status: "順番待ち",
         pages: [],
@@ -57,12 +63,21 @@ export function reducer(items: Item[], action: Action): Item[] {
   return items.map((item) => {
     if (item.id !== action.id) return item;
     if (action.type === "start") {
+      // 再開のときは、読み終えたページ（pages）を残したまま続きから始める
       return {
         ...item,
         phase: "running",
         status: "PDF を読み込み中",
-        startedAt: action.startedAt,
-        pageStartedAt: action.startedAt,
+        startedAt: action.at,
+        pageStartedAt: action.at,
+      };
+    }
+    if (action.type === "pause") {
+      return {
+        ...item,
+        phase: "paused",
+        status: `一時停止中（再開すると ${item.pages.length + 1} ページ目から続けます）`,
+        activeMs: (item.activeMs ?? 0) + action.at - (item.startedAt ?? action.at),
       };
     }
     if (action.type === "fail") {
@@ -86,7 +101,12 @@ export function reducer(items: Item[], action: Action): Item[] {
       case "jev":
         return { ...item, exchange: event.exchange };
       case "result":
-        return { ...item, phase: "done", verdict: event.verdict, elapsedMs: event.elapsedMs };
+        return {
+          ...item,
+          phase: "done",
+          verdict: event.verdict,
+          elapsedMs: (item.activeMs ?? 0) + event.elapsedMs,
+        };
       case "error":
         return { ...item, phase: "error", error: event.message };
     }
@@ -115,38 +135,56 @@ export function timingsOf(item: Item): Timings {
 const RECENT_PAGES = 10;
 
 const mean = (values: number[]) => values.reduce((sum, v) => sum + v, 0) / values.length;
+const pageMs = (page: PageResult) => page.renderMs + page.ocrMs;
+
+export type Progress = {
+  /** 全件が終わるまでの残り時間の目安。1 ページも読み終えていない間は null */
+  remainingMs: number | null;
+  /** 最後に投入したまとまりの進み具合（0〜1） */
+  fraction: number;
+};
 
 /**
- * 全件が終わるまでの残り時間の目安（ミリ秒）。
+ * 全体の進み具合と、残り時間の目安。
  * 時間のほとんどは OCR なので「残りページ数 × 1 ページあたりの時間」で見積もる。
  * 順番待ちの PDF はページ数がまだ分からないので、これまでの平均ページ数を当てる。
- * 1 ページも読み終えていない間や、残りが無いときは null。
  */
-export function estimateRemainingMs(items: Item[], now: number): number | null {
-  const running = items.find((item) => item.phase === "running");
-  const queued = items.filter((item) => item.phase === "queued").length;
-  if (!running && queued === 0) return null;
+export function estimateProgress(items: Item[], now: number): Progress {
+  const batch = items.at(-1)?.batch;
+  const current = items.filter((item) => item.batch === batch);
+  const active = current.find((item) => item.phase === "running" || item.phase === "paused");
+  const queued = current.filter((item) => item.phase === "queued").length;
+  if (!active && queued === 0) return { remainingMs: 0, fraction: current.length > 0 ? 1 : 0 };
 
-  const pageTimes = items.flatMap((item) => item.pages.map((page) => page.renderMs + page.ocrMs));
-  if (pageTimes.length === 0) return null;
+  // 速さは過去の投入分も含めて見る
+  const pageTimes = items.flatMap((item) => item.pages.map(pageMs));
+  if (pageTimes.length === 0) return { remainingMs: null, fraction: 0 };
   const msPerPage = mean(pageTimes.slice(-RECENT_PAGES));
   const pagesPerPdf = mean(
     items.flatMap((item) => (item.processedPages === undefined ? [] : [item.processedPages])),
   );
 
-  let remaining = queued * pagesPerPdf * msPerPage;
-  if (running) {
-    if (running.processedPages === undefined) {
-      remaining += pagesPerPdf * msPerPage;
-    } else {
-      const pagesLeft = running.processedPages - running.pages.length;
-      if (pagesLeft > 0) {
-        const spent = now - (running.pageStartedAt ?? now);
-        remaining += (pagesLeft - 1) * msPerPage + Math.max(msPerPage - spent, 0);
+  let remainingMs = queued * pagesPerPdf * msPerPage;
+  let spentOnPage = 0;
+  if (active) {
+    const pagesLeft =
+      active.processedPages === undefined
+        ? pagesPerPdf
+        : active.processedPages - active.pages.length;
+    if (pagesLeft > 0) {
+      // 一時停止すると読みかけのページは最初からやり直しになるので、かけた時間は数えない
+      if (active.phase === "running") {
+        const spent = now - (active.pageStartedAt ?? now);
+        spentOnPage = Math.min(Math.max(spent, 0), msPerPage);
       }
+      remainingMs += pagesLeft * msPerPage - spentOnPage;
     }
   }
-  return remaining;
+
+  const doneMs =
+    current.reduce((sum, item) => sum + item.pages.reduce((s, page) => s + pageMs(page), 0), 0) +
+    spentOnPage;
+  return { remainingMs, fraction: doneMs / (doneMs + remainingMs) };
 }
 
 export function formatMs(ms: number): string {
