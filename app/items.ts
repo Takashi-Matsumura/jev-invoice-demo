@@ -20,6 +20,8 @@ export type Item = {
   status: string;
   /** 処理を始めた時刻（Date.now()）。経過時間のカウントアップに使う */
   startedAt?: number;
+  /** いま読んでいるページに取りかかった時刻。残り時間の目安に使う */
+  pageStartedAt?: number;
   pageCount?: number;
   processedPages?: number;
   pages: PageResult[];
@@ -34,7 +36,7 @@ export type Item = {
 export type Action =
   | { type: "add"; items: { id: string; name: string }[] }
   | { type: "start"; id: string; startedAt: number }
-  | { type: "event"; id: string; event: ClassifyEvent }
+  | { type: "event"; id: string; event: ClassifyEvent; at: number }
   | { type: "fail"; id: string; message: string }
   | { type: "clear" };
 
@@ -60,6 +62,7 @@ export function reducer(items: Item[], action: Action): Item[] {
         phase: "running",
         status: "PDF を読み込み中",
         startedAt: action.startedAt,
+        pageStartedAt: action.startedAt,
       };
     }
     if (action.type === "fail") {
@@ -73,7 +76,7 @@ export function reducer(items: Item[], action: Action): Item[] {
       case "status":
         return { ...item, status: event.message };
       case "page":
-        return { ...item, pages: [...item.pages, event] };
+        return { ...item, pages: [...item.pages, event], pageStartedAt: action.at };
       case "checks":
         return {
           ...item,
@@ -106,6 +109,44 @@ export function timingsOf(item: Item): Timings {
     registrationMs: item.registrationMs ?? 0,
     jevMs: item.exchange?.elapsedMs ?? 0,
   };
+}
+
+/** 1 ページあたりの時間は、直近のこの枚数の平均で見積もる。途中で遅くなっても追従させるため */
+const RECENT_PAGES = 10;
+
+const mean = (values: number[]) => values.reduce((sum, v) => sum + v, 0) / values.length;
+
+/**
+ * 全件が終わるまでの残り時間の目安（ミリ秒）。
+ * 時間のほとんどは OCR なので「残りページ数 × 1 ページあたりの時間」で見積もる。
+ * 順番待ちの PDF はページ数がまだ分からないので、これまでの平均ページ数を当てる。
+ * 1 ページも読み終えていない間や、残りが無いときは null。
+ */
+export function estimateRemainingMs(items: Item[], now: number): number | null {
+  const running = items.find((item) => item.phase === "running");
+  const queued = items.filter((item) => item.phase === "queued").length;
+  if (!running && queued === 0) return null;
+
+  const pageTimes = items.flatMap((item) => item.pages.map((page) => page.renderMs + page.ocrMs));
+  if (pageTimes.length === 0) return null;
+  const msPerPage = mean(pageTimes.slice(-RECENT_PAGES));
+  const pagesPerPdf = mean(
+    items.flatMap((item) => (item.processedPages === undefined ? [] : [item.processedPages])),
+  );
+
+  let remaining = queued * pagesPerPdf * msPerPage;
+  if (running) {
+    if (running.processedPages === undefined) {
+      remaining += pagesPerPdf * msPerPage;
+    } else {
+      const pagesLeft = running.processedPages - running.pages.length;
+      if (pagesLeft > 0) {
+        const spent = now - (running.pageStartedAt ?? now);
+        remaining += (pagesLeft - 1) * msPerPage + Math.max(msPerPage - spent, 0);
+      }
+    }
+  }
+  return remaining;
 }
 
 export function formatMs(ms: number): string {

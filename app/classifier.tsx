@@ -4,6 +4,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import type { ClassifyEvent } from "@/lib/events";
 import { CATEGORY_LABELS, type Category } from "@/lib/verdict";
 import { DetailDialog } from "./detail-dialog";
+import { Eta } from "./eta";
 import { ItemCard } from "./item-card";
 import { CATEGORY_STYLES, reducer } from "./items";
 import { Stats } from "./stats";
@@ -65,7 +66,7 @@ export function Classifier() {
     let finished = false;
     await readNdjson(res.body, (event) => {
       if (event.type === "result" || event.type === "error") finished = true;
-      dispatch({ type: "event", id, event });
+      dispatch({ type: "event", id, event, at: Date.now() });
     });
     if (!finished) throw new Error("応答が途中で切れました");
   }
@@ -86,7 +87,13 @@ export function Classifier() {
         dispatch({
           type: "fail",
           id: next.id,
-          message: error instanceof Error ? error.message : String(error),
+          // fetch は接続が切れると TypeError（"network error" など）を投げる
+          message:
+            error instanceof TypeError
+              ? "サーバとの接続が途中で切れました（PC のスリープなどで起こります）"
+              : error instanceof Error
+                ? error.message
+                : String(error),
         });
       }
     }
@@ -103,6 +110,36 @@ export function Classifier() {
   }
 
   const busy = items.some((item) => item.phase === "queued" || item.phase === "running");
+
+  // 処理中は画面を点けたままにして、放置によるスリープで接続が切れるのを防ぐ。
+  // ロックはタブが隠れると外れるので、見える状態に戻ったら取り直す
+  useEffect(() => {
+    if (!busy || !("wakeLock" in navigator)) return;
+
+    let lock: WakeLockSentinel | null = null;
+    let released = false;
+    const acquire = () => {
+      navigator.wakeLock
+        .request("screen")
+        .then((sentinel) => {
+          if (released) void sentinel.release();
+          else lock = sentinel;
+        })
+        .catch(() => {});
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") acquire();
+    };
+
+    acquire();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      released = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      void lock?.release();
+    };
+  }, [busy]);
+
   const finishedCount = items.filter((item) => item.phase === "done" || item.phase === "error").length;
   const detailItem = items.find((item) => item.id === detailId);
 
@@ -166,6 +203,7 @@ export function Classifier() {
           <span className="text-zinc-500 tabular-nums dark:text-zinc-400">
             {finishedCount} / {items.length} 件 完了
           </span>
+          {busy && <Eta items={items} />}
           <label className="ml-auto flex cursor-pointer items-center gap-1.5 select-none">
             <input
               type="checkbox"
