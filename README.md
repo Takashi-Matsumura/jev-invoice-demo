@@ -1,36 +1,120 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 請求書 PDF の仕分けデモ
 
-## Getting Started
+スキャンした PDF を、後続の処理に進む前に「請求書」「要確認」「請求書以外」「読取不可」に仕分けるデモです。
+AI-OCR と jev（TypeSafe AI）による分類の仕組みを、経理・総務などの担当部署に説明するために作っています。
 
-First, run the development server:
+請求書のスキャンには、納品書が混ざっていたり、スキャンのミスで内容が欠けていたり、適格請求書発行事業者の登録番号（T＋13桁）が載ったページが抜けていたりすることがあります。それを人が 1 枚ずつ見る前に仕分けます。
+
+## 仕組み
+
+PDF 1 件ごとに、次の 5 段階を順に実行します。
+
+| 段階 | 実行場所 | 内容 |
+|---|---|---|
+| 1. 画像化 | この PC | mupdf で PDF をページごとの画像にする |
+| 2. AI-OCR | この PC | vision 対応のローカル LLM（llama-server）が画像を文字起こしする |
+| 3. 登録番号の検出 | この PC | 正規表現で T＋13桁を拾い、法人番号のチェックデジットで読み違いを検出する |
+| 4. jev で判定 | 外部 API | 文字起こししたテキストに、型付きの質問（書類の種類、必須項目の有無、途切れ）を投げる |
+| 5. 分類 | この PC | 3 と 4 の結果からルールで分類を決める |
+
+PDF と画像は PC の外に出ません。**文字起こししたテキストは TypeSafe AI の API に送信されます。**
+
+jev は文章を生成せず、質問に対する答えとその確率だけを返します。AI に任せるのは「読む」ことと「確率を答える」ことだけで、登録番号の検出と最終的な分類はルールで決めています。
+
+### 分類のルール
+
+| 分類 | 条件 |
+|---|---|
+| 請求書 | 書類の種類が請求書で、登録番号と必須項目（請求金額の合計・発行元・発行日または請求年月）が揃っている |
+| 要確認 | 請求書だが、登録番号が見つからない／チェックデジットに合わない／必須項目が欠けている／内容が途切れている疑いがある／確信度が低い |
+| 請求書以外 | 納品書・領収書・見積書・その他 |
+| 読取不可 | 文字をほとんど読み取れなかった |
+
+質問文と閾値は `lib/invoice-questions.ts`、分類のルールは `lib/verdict.ts` にあります。jev は日本語の精度が英語より低いと公式に明記されているため、質問文は英語で書き、判定基準に帳票の日本語の語句を入れています。
+
+## 画面
+
+- **PDF の投入**: 左上の欄に PDF をドロップします（複数可）。1 件ずつ順に処理し、終わったものから結果が確定します。
+- **進捗の表示**: 処理が始まると、投入欄が進捗表示に変わります。円形のバーが全体の進み具合を、中央が残り時間を、横が完了予定時刻の目安を示します。処理中は PDF を追加できません。
+- **一時停止と再開**: 「一時停止」ですぐに止まり、「再開」で読み終えたページの続きから再開します。
+- **結果カード**: jev が返した確率を数値で並べます。請求書で基準を外れた項目は黄色になります。「要確認」と「読取不可」には理由が出ます。
+- **詳細**: 各カードの「詳細」で、ページ画像と OCR テキスト、登録番号の検出結果、jev に送った質問と選択肢ごとの確率を確認できます。
+- **処理時間の内訳**: 左側に、ステップごとの合計・割合・1 ページあたり・PDF 1 件あたりの時間が出ます。
+- **自動スクロール**: 処理中のカードが常に見えるように、右側の一覧を送ります。チェックを外すと止まります。
+
+### 完了予定の目安
+
+時間のほとんどは AI-OCR なので、「残りページ数 × 1 ページあたりの時間」で見積もっています。1 ページあたりの時間は直近 10 ページの平均で、順番待ちの PDF にはそれまでの平均ページ数を当てます。1 ページ終わるごとに見積もり直すので、あくまで目安です。
+
+### スリープについて
+
+処理中に PC がスリープすると、ブラウザとサーバの接続が切れてその PDF はエラーになります。これを避けるため、処理中は画面を点けたままにする指定（Screen Wake Lock）を出しています。タブを切り替えたりウィンドウを最小化すると効かなくなり、蓋を閉じた場合も防げません。
+
+## 前提
+
+- Node.js 20.9 以上
+- vision 対応の llama-server が起動していること（既定は `http://localhost:8084`）
+- TypeSafe AI の API キー（https://docs.typesafe.ai/api）
+
+llama-server の起動例（Qwen3-VL 8B の場合）:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+llama-server -m Qwen3VL-8B-Instruct-Q4_K_M.gguf \
+  --mmproj mmproj-Qwen3VL-8B-Instruct-F16.gguf \
+  --port 8084 -c 16384
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 起動
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cp .env.local.example .env.local   # TYPESAFE_API_KEY を記入する
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+http://localhost:3000 を開き、PDF をドロップします。
 
-## Learn More
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `TYPESAFE_API_KEY` | （必須） | jev の API キー |
+| `LLAMA_VLM_BASE_URL` | `http://localhost:8084` | OCR に使う llama-server |
+| `LLAMA_VLM_MODEL` | `default` | llama-server に渡すモデル名 |
 
-To learn more about Next.js, take a look at the following resources:
+## 検証
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run typecheck && npm run lint && npm test
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+実物の PDF で試す場合は `samples/` に置いてください（git の管理対象外です）。
 
-## Deploy on Vercel
+## 構成
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+app/
+  api/classify/route.ts   PDF 1 件を処理し、各段階を NDJSON で逐次返す
+  classifier.tsx          投入・キュー・一時停止などの画面全体の制御
+  progress-clock.tsx      円形の進捗と完了予定の目安
+  item-card.tsx           PDF ごとの結果カード
+  detail-dialog.tsx       処理の中身を見せるモーダル
+  stats.tsx               処理時間の内訳
+  items.ts                画面の状態と、残り時間の見積もり
+lib/
+  ocr.ts                  PDF の画像化と、ローカル LLM による文字起こし
+  registration-number.ts  登録番号の抽出とチェックデジット検証
+  jev.ts                  jev（System One）の最小クライアント
+  invoice-questions.ts    jev への質問と閾値
+  verdict.ts              分類のルール
+  events.ts               NDJSON イベントの型
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 制限
+
+- 1 ファイル 20MB まで、先頭 10 ページまでを読みます
+- 登録番号が実在するかどうか（国税庁の公表サイトとの照合）は確認しません
+- 質問文と閾値は、少数のサンプルで確かめた初期値です。実際の帳票に合わせた調整が必要です
+- 認証や結果の保存はありません。手元の PC で動かす説明用のデモです
+
+## ライセンス
+
+[MIT](./LICENSE)

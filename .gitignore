@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.local.example
+
+# 検証用の実物 PDF（請求書など）。リポジトリには入れない
+/samples/
 
 # vercel
 .vercel
