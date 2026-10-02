@@ -12,8 +12,8 @@ const PREVIEW_SCALE = 3; // 約 216 DPI。画面で拡大して、細かい文�
 const PREVIEW_JPEG_QUALITY = 70;
 const OCR_TIMEOUT_MS = 180_000;
 const OCR_MAX_TOKENS = 4096;
-const LOCATE_TIMEOUT_MS = 60_000;
-const LOCATE_MAX_TOKENS = 1024;
+const LOCATE_TIMEOUT_MS = 90_000;
+const LOCATE_MAX_TOKENS = 2048;
 
 const OCR_PROMPT =
   "この画像に写っている文字を、レイアウトの上から下・左から右の順序通りに、省略せず正確に書き起こしてください。" +

@@ -2,18 +2,31 @@
  * ページ画像の上で、重要な項目が書かれている場所。
  *
  * 場所は vision LLM に答えさせる。ただし LLM は、そのページに無い項目の座標も作ってくる。
- * そこで「その場所に書かれている文字」も一緒に答えさせ、OCR テキストとルールで
- * 裏を取れたものだけを残す。
+ * そこで「その場所に書かれている文字」も一緒に答えさせ、項目の形に合わないものは捨て、
+ * 残りには、その文字が OCR テキストにもあるかどうかの印を付ける。
+ *
+ * OCR テキストに無いものを捨てないのは、OCR のほうが行を読み落とすことがあるため。
+ * 捨てると、正しく囲めていた項目まで消える。
  */
 
 import { FIELD_LABELS } from "./invoice-questions";
 import { findRegistrationNumbers } from "./registration-number";
 
+/**
+ * 囲む項目。仕分けの判定に使う項目に加えて、後工程の確認に要るものを入れている。
+ * - 請求先の名前: 請求先の会社を取り違えていないか（グループ会社あての請求書など）
+ * - お客様電話番号・お客様番号: どの案件の回線かを、営業に問い合わせるための手がかり
+ * - 発行元の支店名・住所: 同じ会社名で支払先が複数あるときに、どの支払先かを決める手がかり
+ */
 export const BOX_FIELD_LABELS = {
   total_amount: FIELD_LABELS.has_total_amount,
-  issuer: FIELD_LABELS.has_issuer,
   billing_date: FIELD_LABELS.has_billing_date,
+  issuer: FIELD_LABELS.has_issuer,
+  issuer_branch: "発行元の支店名",
+  issuer_address: "発行元の住所",
   registration_number: "登録番号",
+  recipient: "請求先の名前",
+  customer_number: "お客様電話番号・お客様番号",
 } as const;
 
 export type BoxField = keyof typeof BOX_FIELD_LABELS;
@@ -22,6 +35,8 @@ export type FieldBox = {
   field: BoxField;
   /** その場所に書かれている文字（LLM の答え） */
   text: string;
+  /** その文字が OCR テキストにもあるか。無ければ、OCR の読み落としか、LLM の読み違い・作り話 */
+  inOcrText: boolean;
   /** 左上の位置と大きさ。ページ画像の幅・高さに対する割合（0〜1） */
   x: number;
   y: number;
@@ -32,8 +47,13 @@ export type FieldBox = {
 export const LOCATE_PROMPT = `この画像の中で、次の項目の「値」が書かれている場所を示してください。
 - total_amount: 請求金額の合計（例: 8,470円）
 - issuer: この書類を発行した会社の名前
+- issuer_branch: 発行した会社の支店名・営業所名（「支店」「営業所」「センタ」などで終わる）
+- issuer_address: 発行した会社の住所
+- recipient: 請求先（宛先）の会社名や氏名（「様」「御中」が付いている）
+- customer_number: 請求先のお客様電話番号、お客様番号、契約番号
 - billing_date: 発行日または請求年月
 - registration_number: 適格請求書発行事業者の登録番号（T に続く 13 桁の数字）
+同じ項目が複数の場所にあれば、それぞれ出力してください。
 このページに書かれていない項目は出力に含めないでください。推測で座標を作らないでください。
 JSON の配列だけを出力してください。形式: [{"label": "項目名", "text": "その場所に書かれている文字", "bbox_2d": [x1, y1, x2, y2]}]
 どの項目も無ければ [] を出力してください。`;
@@ -41,13 +61,13 @@ JSON の配列だけを出力してください。形式: [{"label": "項目名"
 /** Qwen-VL 系は、画像の大きさによらず 0〜1000 の相対座標で答える */
 const COORD_MAX = 1000;
 /** 1 ページで囲む数の上限。LLM が同じ答えを繰り返し続けた場合の歯止め */
-const MAX_BOXES_PER_PAGE = 12;
+const MAX_BOXES_PER_PAGE = 24;
 
 /** 表記ゆれ（全角・半角、空白の有無）を無視して比べるための正規化 */
 const squash = (text: string) => text.normalize("NFKC").replace(/\s+/g, "");
 
 /**
- * LLM の答えを読み、裏を取れた枠だけを返す。読めない答えは空配列にする。
+ * LLM の答えを読み、項目の形に合う枠だけを返す。読めない答えは空配列にする。
  * pageText はそのページの OCR テキスト。
  */
 export function parseFieldBoxes(answer: string, pageText: string): FieldBox[] {
@@ -67,8 +87,8 @@ export function parseFieldBoxes(answer: string, pageText: string): FieldBox[] {
   const haystack = squash(pageText);
   const boxes: FieldBox[] = [];
   for (const entry of parsed) {
-    const box = readBox(entry);
-    if (box && isBackedByText(box, haystack)) boxes.push(box);
+    const box = readBox(entry, haystack);
+    if (box && hasExpectedForm(box)) boxes.push(box);
   }
 
   // 違う項目に同じ場所を答えているのは当て推量なので、どれも採らない
@@ -88,7 +108,7 @@ export function parseFieldBoxes(answer: string, pageText: string): FieldBox[] {
     .slice(0, MAX_BOXES_PER_PAGE);
 }
 
-function readBox(entry: unknown): FieldBox | null {
+function readBox(entry: unknown, haystack: string): FieldBox | null {
   if (typeof entry !== "object" || entry === null) return null;
   const { label, text, bbox_2d: bbox } = entry as Record<string, unknown>;
 
@@ -103,6 +123,7 @@ function readBox(entry: unknown): FieldBox | null {
   return {
     field: label as BoxField,
     text: text.trim(),
+    inOcrText: haystack.includes(squash(text)),
     x: x1,
     y: y1,
     width: x2 - x1,
@@ -110,18 +131,19 @@ function readBox(entry: unknown): FieldBox | null {
   };
 }
 
-function isBackedByText(box: FieldBox, haystack: string): boolean {
+function hasExpectedForm(box: FieldBox): boolean {
   const text = squash(box.text);
-  // OCR で読めていない文字を答えているなら、場所も当てにならない
-  if (!haystack.includes(text)) return false;
-
   switch (box.field) {
     case "registration_number":
       return findRegistrationNumbers(box.text).length > 0;
     case "total_amount":
     case "billing_date":
+    case "customer_number":
       return /\d/.test(text);
     case "issuer":
+    case "issuer_branch":
+    case "issuer_address":
+    case "recipient":
       return true;
   }
 }

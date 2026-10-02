@@ -100,8 +100,8 @@ export function DetailDialog({ item, onClose }: { item: Item; onClose: () => voi
                   </div>
                   <BoxedImage page={page} />
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    枠の位置はローカルの AI が答えたものです。読み取った文字が OCR
-                    の結果と合うものだけを囲んでいます。
+                    枠の位置と文字はローカルの AI が答えたものです。その文字が OCR
+                    の結果に無い場合は、破線で囲みます。
                   </p>
                 </div>
                 <div>
