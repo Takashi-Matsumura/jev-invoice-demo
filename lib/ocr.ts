@@ -8,6 +8,7 @@ import * as mupdf from "mupdf";
 import { LOCATE_PROMPT, parseFieldBoxes, type FieldBox } from "./field-boxes";
 
 const RENDER_SCALE = 2; // 約 144 DPI。OCR に足りる細かさで、画像が大きくなりすぎない
+const PREVIEW_SCALE = 3; // 約 216 DPI。画面で拡大して、細かい文字を目で確かめられる細かさ
 const PREVIEW_JPEG_QUALITY = 70;
 const OCR_TIMEOUT_MS = 180_000;
 const OCR_MAX_TOKENS = 4096;
@@ -22,7 +23,7 @@ const OCR_PROMPT =
 export type RenderedPage = {
   /** OCR に渡す PNG（base64） */
   png: string;
-  /** 画面表示用の軽い JPEG（data URL） */
+  /** 画面表示用の JPEG（data URL）。拡大して見るので、OCR 用より細かい */
   preview: string;
 };
 
@@ -44,17 +45,19 @@ export function openPdf(bytes: Uint8Array): OpenedPdf {
     pageCount: doc.countPages(),
     renderPage(index) {
       const page = doc.loadPage(index);
-      const pixmap = page.toPixmap(
-        mupdf.Matrix.scale(RENDER_SCALE, RENDER_SCALE),
-        mupdf.ColorSpace.DeviceRGB,
-        false,
-      );
+      const render = (scale: number) =>
+        page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);
       try {
-        const png = Buffer.from(pixmap.asPNG()).toString("base64");
-        const jpeg = Buffer.from(pixmap.asJPEG(PREVIEW_JPEG_QUALITY)).toString("base64");
+        const forOcr = render(RENDER_SCALE);
+        const png = Buffer.from(forOcr.asPNG()).toString("base64");
+        forOcr.destroy();
+
+        const forPreview = render(PREVIEW_SCALE);
+        const jpeg = Buffer.from(forPreview.asJPEG(PREVIEW_JPEG_QUALITY)).toString("base64");
+        forPreview.destroy();
+
         return { png, preview: `data:image/jpeg;base64,${jpeg}` };
       } finally {
-        pixmap.destroy();
         page.destroy();
       }
     },
