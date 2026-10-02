@@ -1,7 +1,7 @@
 import type { ClassifyEvent } from "@/lib/events";
 import { QUESTIONS, readAnswers } from "@/lib/invoice-questions";
 import { askJev } from "@/lib/jev";
-import { locateFields, ocrImage, openPdf, type OpenedPdf } from "@/lib/ocr";
+import { findMissedLines, locateFields, ocrImage, openPdf, type OpenedPdf } from "@/lib/ocr";
 import { findRegistrationNumbers } from "@/lib/registration-number";
 import { decideVerdict, MIN_OCR_CHARS, unreadableVerdict } from "@/lib/verdict";
 
@@ -80,7 +80,14 @@ export async function POST(request: Request) {
           const renderStartedAt = performance.now();
           const { png, preview } = pdf.renderPage(i);
           const ocrStartedAt = performance.now();
-          const text = await ocrImage(png, signal);
+          const transcribed = await ocrImage(png, signal);
+
+          send({
+            type: "status",
+            message: `${i + 1}/${processedPages} ページ目の読み落としを確認中（ローカル AI-OCR）`,
+          });
+          const missed = transcribed ? await findMissedLines(png, transcribed, signal) : [];
+          const text = [transcribed, ...missed].join("\n");
           texts.push(text);
 
           send({
@@ -93,6 +100,7 @@ export async function POST(request: Request) {
             type: "page",
             page: i + 1,
             text,
+            addedLines: missed.length,
             image: preview,
             boxes,
             renderMs: Math.round(ocrStartedAt - renderStartedAt),

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { DOC_TYPE_LABELS, QUESTION_LABELS } from "@/lib/invoice-questions";
 import type { JevAnswer, JevExchange } from "@/lib/jev";
 import { StatusBadge } from "./item-card";
-import { formatMs, type Item } from "./items";
+import { formatMs, type Item, type PageResult } from "./items";
 import { BoxedImage, BoxLegend } from "./page-image";
 import { PageViewer } from "./page-viewer";
 
@@ -106,11 +106,13 @@ export function DetailDialog({ item, onClose }: { item: Item; onClose: () => voi
                 </div>
                 <div>
                   <p className="mb-1 text-xs text-zinc-500 dark:text-zinc-400">
-                    {page.page} ページ目・{page.text.length} 文字・画像化 {formatMs(page.renderMs)}
+                    {page.page} ページ目・{page.text.length} 文字
+                    {page.addedLines > 0 && <>（見直しで {page.addedLines} 行を追加）</>}・画像化{" "}
+                    {formatMs(page.renderMs)}
                     ・OCR {formatMs(page.ocrMs)}・位置検出 {formatMs(page.locateMs)}
                   </p>
                   <pre className="max-h-[32rem] overflow-auto rounded bg-zinc-100 p-3 font-mono text-xs whitespace-pre-wrap dark:bg-zinc-800">
-                    {page.text || "（文字なし）"}
+                    <OcrText page={page} />
                   </pre>
                 </div>
               </div>
@@ -159,6 +161,26 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h3 className="font-semibold">{title}</h3>
       {children}
     </section>
+  );
+}
+
+/** 書き起こし。読み落としの見直しで足した行は、色を付けて区別する。 */
+function OcrText({ page }: { page: PageResult }) {
+  if (!page.text) return "（文字なし）";
+  if (!page.addedLines) return page.text;
+
+  const lines = page.text.split("\n");
+  const firstAdded = lines.length - page.addedLines;
+  return (
+    <>
+      {lines.slice(0, firstAdded).join("\n")}
+      <span className="mt-2 block border-t border-dashed border-zinc-400 pt-1 font-sans text-zinc-500 dark:border-zinc-500 dark:text-zinc-400">
+        見直しで追加した行（最初の書き起こしで読み落としていた文字）
+      </span>
+      <span className="block bg-amber-100 dark:bg-amber-950">
+        {lines.slice(firstAdded).join("\n")}
+      </span>
+    </>
   );
 }
 

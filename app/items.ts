@@ -9,6 +9,7 @@ import type { Category, Verdict } from "@/lib/verdict";
 export type PageResult = {
   page: number;
   text: string;
+  addedLines: number;
   image: string;
   boxes: FieldBox[];
   renderMs: number;

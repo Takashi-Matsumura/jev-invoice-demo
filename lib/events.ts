@@ -12,7 +12,9 @@ export type ClassifyEvent =
   | {
       type: "page";
       page: number;
+      /** 書き起こし。末尾の addedLines 行は、読み落としの見直しで足した行 */
       text: string;
+      addedLines: number;
       image: string;
       /** 画像の上で、重要な項目が書かれている場所 */
       boxes: FieldBox[];
