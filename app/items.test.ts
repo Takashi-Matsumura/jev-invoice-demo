@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { estimateProgress, reducer, type Item } from "./items";
 
-const page = (ocrMs: number) => ({ page: 1, text: "", image: "", renderMs: 0, ocrMs });
+const page = (ocrMs: number) => ({
+  page: 1,
+  text: "",
+  image: "",
+  boxes: [],
+  renderMs: 0,
+  ocrMs,
+  locateMs: 0,
+});
 
 function item(overrides: Partial<Item>): Item {
   return { id: "x", name: "x.pdf", batch: 1, phase: "queued", status: "", pages: [], ...overrides };

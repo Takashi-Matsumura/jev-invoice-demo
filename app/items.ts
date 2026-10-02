@@ -1,6 +1,7 @@
 /** 画面が持つ PDF ごとの状態と、表示用の小さなヘルパー。 */
 
 import type { ClassifyEvent } from "@/lib/events";
+import type { FieldBox } from "@/lib/field-boxes";
 import type { JevExchange } from "@/lib/jev";
 import type { RegistrationNumber } from "@/lib/registration-number";
 import type { Category, Verdict } from "@/lib/verdict";
@@ -9,8 +10,10 @@ export type PageResult = {
   page: number;
   text: string;
   image: string;
+  boxes: FieldBox[];
   renderMs: number;
   ocrMs: number;
+  locateMs: number;
 };
 
 export type Item = {
@@ -116,6 +119,7 @@ export function reducer(items: Item[], action: Action): Item[] {
 export const STEPS = [
   { key: "renderMs", label: "画像化", color: "bg-zinc-400" },
   { key: "ocrMs", label: "AI-OCR", color: "bg-indigo-500" },
+  { key: "locateMs", label: "項目の位置検出", color: "bg-sky-500" },
   { key: "registrationMs", label: "登録番号の検出", color: "bg-emerald-500" },
   { key: "jevMs", label: "jev 判定", color: "bg-amber-500" },
 ] as const;
@@ -126,6 +130,7 @@ export function timingsOf(item: Item): Timings {
   return {
     renderMs: item.pages.reduce((sum, page) => sum + page.renderMs, 0),
     ocrMs: item.pages.reduce((sum, page) => sum + page.ocrMs, 0),
+    locateMs: item.pages.reduce((sum, page) => sum + page.locateMs, 0),
     registrationMs: item.registrationMs ?? 0,
     jevMs: item.exchange?.elapsedMs ?? 0,
   };
@@ -135,7 +140,7 @@ export function timingsOf(item: Item): Timings {
 const RECENT_PAGES = 10;
 
 const mean = (values: number[]) => values.reduce((sum, v) => sum + v, 0) / values.length;
-const pageMs = (page: PageResult) => page.renderMs + page.ocrMs;
+const pageMs = (page: PageResult) => page.renderMs + page.ocrMs + page.locateMs;
 
 export type Progress = {
   /** 全件が終わるまでの残り時間の目安。1 ページも読み終えていない間は null */
@@ -146,7 +151,7 @@ export type Progress = {
 
 /**
  * 全体の進み具合と、残り時間の目安。
- * 時間のほとんどは OCR なので「残りページ数 × 1 ページあたりの時間」で見積もる。
+ * 時間のほとんどはページごとの OCR と位置検出なので「残りページ数 × 1 ページあたりの時間」で見積もる。
  * 順番待ちの PDF はページ数がまだ分からないので、これまでの平均ページ数を当てる。
  */
 export function estimateProgress(items: Item[], now: number): Progress {

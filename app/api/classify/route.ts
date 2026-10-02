@@ -1,7 +1,7 @@
 import type { ClassifyEvent } from "@/lib/events";
 import { QUESTIONS, readAnswers } from "@/lib/invoice-questions";
 import { askJev } from "@/lib/jev";
-import { ocrImage, openPdf, type OpenedPdf } from "@/lib/ocr";
+import { locateFields, ocrImage, openPdf, type OpenedPdf } from "@/lib/ocr";
 import { findRegistrationNumbers } from "@/lib/registration-number";
 import { decideVerdict, MIN_OCR_CHARS, unreadableVerdict } from "@/lib/verdict";
 
@@ -11,7 +11,7 @@ const MAX_PAGES = 10;
 const MAX_STATE_CHARS = 16_000;
 
 /**
- * PDF 1 件を受け取り、画像化 → OCR → 登録番号の検出 → jev → 判定 の各段階を NDJSON で流す。
+ * PDF 1 件を受け取り、画像化 → OCR → 項目の位置検出 → 登録番号の検出 → jev → 判定 の各段階を NDJSON で流す。
  * 複数ファイルはクライアントが 1 件ずつ送ってくる。
  */
 export async function POST(request: Request) {
@@ -82,13 +82,22 @@ export async function POST(request: Request) {
           const ocrStartedAt = performance.now();
           const text = await ocrImage(png, signal);
           texts.push(text);
+
+          send({
+            type: "status",
+            message: `${i + 1}/${processedPages} ページ目の項目の位置を検出中（ローカル AI）`,
+          });
+          const locateStartedAt = performance.now();
+          const boxes = text ? await locateFields(png, text, signal) : [];
           send({
             type: "page",
             page: i + 1,
             text,
             image: preview,
+            boxes,
             renderMs: Math.round(ocrStartedAt - renderStartedAt),
-            ocrMs: Math.round(performance.now() - ocrStartedAt),
+            ocrMs: Math.round(locateStartedAt - ocrStartedAt),
+            locateMs: Math.round(performance.now() - locateStartedAt),
           });
         }
 
