@@ -4,7 +4,7 @@ import { formatMs, STEPS, timingsOf, type Item, type Timings } from "./items";
 export function Stats({ items }: { items: Item[] }) {
   const done = items.filter((item) => item.verdict);
   const pageCount = done.reduce((sum, item) => sum + item.pages.length, 0);
-  const totals: Timings = { renderMs: 0, ocrMs: 0, registrationMs: 0, jevMs: 0 };
+  const totals: Timings = { renderMs: 0, ocrMs: 0, locateMs: 0, registrationMs: 0, jevMs: 0 };
   for (const item of done) {
     const timings = timingsOf(item);
     for (const { key } of STEPS) totals[key] += timings[key];
@@ -43,7 +43,7 @@ export function Stats({ items }: { items: Item[] }) {
                   </span>
                 </div>
                 <p className="mt-0.5 pl-4 text-xs text-zinc-500 dark:text-zinc-400">
-                  {(key === "renderMs" || key === "ocrMs") && pageCount > 0 && (
+                  {(key === "renderMs" || key === "ocrMs" || key === "locateMs") && pageCount > 0 && (
                     <>1 ページあたり {formatMs(totals[key] / pageCount)}・</>
                   )}
                   PDF 1 件あたり {formatMs(totals[key] / done.length)}
