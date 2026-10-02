@@ -4,6 +4,7 @@ import { estimateProgress, reducer, type Item } from "./items";
 const page = (ocrMs: number) => ({
   page: 1,
   text: "",
+  addedLines: 0,
   image: "",
   boxes: [],
   renderMs: 0,
