@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { parseFieldBoxes } from "./field-boxes";
 
 const PAGE_TEXT = [
+  "株式会社オーシーシー 様",
+  "00-5406-1459",
   "NTT西日本株式会社",
+  "沖縄支店",
+  "大阪府大阪市都島区東野田4-15-82",
   "2026年 9月ご請求分",
   "ご請求金額 8,470円",
   "登録番号：T7120001077523",
@@ -23,6 +27,7 @@ describe("parseFieldBoxes", () => {
       {
         field: "total_amount",
         text: "8,470円",
+        inOcrText: true,
         x: 0.65,
         y: 0.27,
         width: expect.closeTo(0.1),
@@ -37,12 +42,14 @@ describe("parseFieldBoxes", () => {
   });
 
   it("空白や全角・半角の違いは無視して OCR テキストと突き合わせる", () => {
-    expect(parse([entry("billing_date", "2026年9月ご請求分")])).toHaveLength(1);
-    expect(parse([entry("total_amount", "８，４７０円")])).toHaveLength(1);
+    expect(parse([entry("billing_date", "2026年9月ご請求分")])).toMatchObject([{ inOcrText: true }]);
+    expect(parse([entry("total_amount", "８，４７０円")])).toMatchObject([{ inOcrText: true }]);
   });
 
-  it("OCR テキストに無い文字を答えた枠は捨てる", () => {
-    expect(parse([entry("issuer", "KDDI株式会社")])).toEqual([]);
+  it("OCR テキストに無い文字を答えた枠は、捨てずに印を付ける", () => {
+    expect(parse([entry("issuer_address", "福岡県福岡市博多区博多駅中央街")])).toMatchObject([
+      { field: "issuer_address", inOcrText: false },
+    ]);
   });
 
   it("登録番号は T＋13桁として読めるものだけを残す", () => {
@@ -50,9 +57,21 @@ describe("parseFieldBoxes", () => {
     expect(parse([entry("registration_number", "E41201221001 11408")])).toEqual([]);
   });
 
-  it("数字の無い金額・日付は捨てる", () => {
+  it("数字の無い金額・日付・お客様番号は捨てる", () => {
     expect(parse([entry("total_amount", "ご請求金額")])).toEqual([]);
     expect(parse([entry("billing_date", "ご請求分")])).toEqual([]);
+    expect(parse([entry("customer_number", "様")])).toEqual([]);
+  });
+
+  it("請求先と、発行元の支店名・住所も囲む", () => {
+    expect(
+      parse([
+        entry("recipient", "株式会社オーシーシー 様", [83, 93, 258, 105]),
+        entry("customer_number", "00-5406-1459", [83, 273, 258, 287]),
+        entry("issuer_branch", "沖縄支店", [780, 41, 837, 51]),
+        entry("issuer_address", "大阪府大阪市都島区東野田４－１５－８２", [706, 97, 914, 107]),
+      ]).map((box) => box.field),
+    ).toEqual(["recipient", "customer_number", "issuer_branch", "issuer_address"]);
   });
 
   it("違う項目に同じ場所を答えていたら、どれも採らない", () => {
