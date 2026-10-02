@@ -44,9 +44,9 @@ export function Stats({ items }: { items: Item[] }) {
                 </div>
                 <p className="mt-0.5 pl-4 text-xs text-zinc-500 dark:text-zinc-400">
                   {(key === "renderMs" || key === "ocrMs" || key === "locateMs") && pageCount > 0 && (
-                    <>1 ページあたり {formatMs(totals[key] / pageCount)}・</>
+                    <>{formatMs(totals[key] / pageCount)}/ページ・</>
                   )}
-                  PDF 1 件あたり {formatMs(totals[key] / done.length)}
+                  {formatMs(totals[key] / done.length)}/PDF
                 </p>
               </li>
             ))}
